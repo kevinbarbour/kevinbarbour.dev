@@ -1,0 +1,124 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta property="og:title" content="Using Plugins in Go"><meta property="og:description" content="Draft&mldr; Draft Notes * Heavily revise notes about go-plugins in general and research/talk a bit more about hashicorp go plugin. * Clean up template example and explanation * Link small demo github repo for easy try out * Follow up and push to get patch merged to go-swagger The Need In the last few years I have designed many APIs, primarily relying on go-swagger as a code and documentation generation tool."><meta property="og:type" content="article"><meta property="og:url" content="https://kevinbarbour.dev/posts/plugins/"><meta property="article:section" content="posts"><meta property="article:published_time" content="2022-10-27T10:19:29-04:00"><meta property="article:modified_time" content="2022-10-27T10:19:29-04:00"><meta name=twitter:card content="summary"><meta name=twitter:title content="Using Plugins in Go"><meta name=twitter:description content="Draft&mldr; Draft Notes * Heavily revise notes about go-plugins in general and research/talk a bit more about hashicorp go plugin. * Clean up template example and explanation * Link small demo github repo for easy try out * Follow up and push to get patch merged to go-swagger The Need In the last few years I have designed many APIs, primarily relying on go-swagger as a code and documentation generation tool."><meta name=theme-color media="(prefers-color-scheme: light)" content="#ffffff"><meta name=theme-color media="(prefers-color-scheme: dark)" content="#262d33"><title>Kevin Barbour - Using Plugins in Go</title><link rel="shortcut icon" href=/favicon.ico type=image/x-icon><link rel=preconnect href=https://fonts.googleapis.com><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel=stylesheet><link rel=stylesheet href=/minima.1666883981.css><script defer type=text/javascript src=/minima.1666883981.js></script></head><script>let theme_2b_used=window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";try{if(!("theme"in localStorage)){const e="system";(e==="dark"||e==="light")&&(theme_2b_used=e),localStorage.theme=theme_2b_used}document.querySelector("html").classList.add(localStorage.theme)}catch(e){console.error(e)}</script><body class="sm:mx-5 sm:my-0"><header class="flex justify-between items-center mb-6 sm:my-3"><div class="flex items-center"><div id=theme-switcher class="text-4xl cursor-pointer"></div></div><nav class="flex items-center
+whitespace-nowrap overflow-x-auto overflow-y-hidden"><a class=ml-5 href=/>Home</a>
+<a class=ml-5 href=/categories>Categories</a>
+<a class=ml-5 href=/about>About</a></nav></header><h1 class="mt-6 mb-6">Using Plugins in Go</h1><div class="mb-3 text-xs flex justify-between sm:flex-col"><div></div></div><main><p></p><article class=md><h2 id=draft>Draft&mldr;</h2><pre tabindex=0><code>Draft Notes
+
+* Heavily revise notes about go-plugins in general and research/talk a bit more about hashicorp go plugin.
+* Clean up template example and explanation
+* Link small demo github repo for easy try out
+* Follow up and push to get patch merged to go-swagger
+</code></pre><h2 id=the-need>The Need</h2><p>In the last few years I have designed many APIs, primarily relying on <a href=TODO>go-swagger</a> as a code and documentation generation tool.</p><p>Most recently while helping to build a new API Framework at <a href=https://www.scylladb.com>ScyllaDB</a> I came across the need to perform some string manipulation in the code generation templates that wasn&rsquo;t supported by go-swagger. After playing with a few different approaches to solving this particular use case I settled on adding the very nice <a href=https://masterminds.github.io/sprig/>sprig</a> library <a href=https://github.com/go-swagger/go-swagger/pull/2741>to go-swagger</a>. This adds a nice set of templating functions to the templating engine of the project and provided exactly what I needed - simply a <code>trimSuffix</code> and <code>trimPrefix</code> function.</p><p>But what if you still need more functionality or have a more unique use case for templating? And what if it is something that doesn&rsquo;t add value as a contribution to the upstream project? This got me thinking about a more modular way to add template functions that doesn&rsquo;t require making a change to the go-swagger codebase each time. With a bit of digging and experimenting, I found go plugins and realized it fit this use case perfectly.</p><h2 id=go-plugins>Go Plugins</h2><p>Go plugins were introduced in <a href=https://go.dev/doc/go1.8>Go 1.8</a>. Before that, there wasn&rsquo;t anything built into the language for adding additional code at runtime, so a few creative projects were started to fill the gaps. The most notable is Hashicorp&rsquo;s <a href=https://github.com/hashicorp/go-plugin>go-plugin</a> which has been in use for over 9 years in widely adopted projects such as <a href=https://www.packer.io>Packer</a> and <a href=https://www.terraform.io>Terraform</a>. It&rsquo;s a very cool solution that uses gRPC on a local network and allows the writing of plugins in any language you see fit. Although a very mature solution this seemed to be a bit overkill for the functionality I was going for. I also always prefer using something out of the Go standard library if the functionality exists, so I decided to dig into the native go-plugins solution and see how it could solve the problem.</p><p>The way Go plugins work is pretty simple. You write your application using the plugin package to load symbols from a plugin, you write your plugin containing the appropriate symbols, and at runtime, you tell your application which plugin to use. We will go through these steps with a very simple example: adding a <a href=https://en.wikipedia.org/wiki/ROT13>ROT13</a> function to a Go template funcmap.</p><p>First a quick aside to what a <code>FuncMap</code> is in Go templates, it is simply a type alias to a map from strings to interfaces{} (or now with go1.18 <code>any</code>):</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-go data-lang=go><span class=line><span class=cl><span class=kd>type</span> <span class=nx>FuncMap</span> <span class=kd>map</span><span class=p>[</span><span class=kt>string</span><span class=p>]</span><span class=nx>any</span>
+</span></span></code></pre></td></tr></table></div></div><p>In practice, the values in the map should almost always be functions that accept some number of strings and return a single string.</p><p>So back to the plugins - let&rsquo;s say we have a FuncMap in our application and we want to allow users to add their functions to it via a plugin. We will define the function signature for our plugin as <code>func(template.FuncMap)</code>, and expect it to be named <code>AddFuncs</code>. The intention will be that <code>AddFuncs</code> will accept the funcmap and simply add new functions to it (or override existing ones).</p><p>In our application this is how we go about loading the plugin:</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span><span class=lnt>21
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-go data-lang=go><span class=line><span class=cl><span class=kd>func</span> <span class=nf>main</span><span class=p>()</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>	<span class=nx>m</span> <span class=o>:=</span> <span class=nx>template</span><span class=p>.</span><span class=nx>FuncMap</span><span class=p>{}</span>
+</span></span><span class=line><span class=cl>	<span class=nx>p</span><span class=p>,</span> <span class=nx>err</span> <span class=o>:=</span> <span class=nx>plugin</span><span class=p>.</span><span class=nf>Open</span><span class=p>(</span><span class=o>*</span><span class=nx>pluginPath</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>	<span class=k>if</span> <span class=nx>err</span> <span class=o>!=</span> <span class=kc>nil</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>		<span class=nb>panic</span><span class=p>(</span><span class=nx>err</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>	<span class=p>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>	<span class=nx>f</span><span class=p>,</span> <span class=nx>err</span> <span class=o>:=</span> <span class=nx>p</span><span class=p>.</span><span class=nf>Lookup</span><span class=p>(</span><span class=s>&#34;AddFuncs&#34;</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>	<span class=k>if</span> <span class=nx>err</span> <span class=o>!=</span> <span class=kc>nil</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>		<span class=nb>panic</span><span class=p>(</span><span class=nx>err</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>	<span class=p>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>	<span class=nx>f</span><span class=p>.(</span><span class=kd>func</span><span class=p>(</span><span class=nx>template</span><span class=p>.</span><span class=nx>FuncMap</span><span class=p>))(</span><span class=nx>m</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>	<span class=nx>t</span> <span class=o>:=</span> <span class=nx>template</span><span class=p>.</span><span class=nf>New</span><span class=p>(</span><span class=s>&#34;demo&#34;</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>	<span class=nx>t</span><span class=p>.</span><span class=nf>Funcs</span><span class=p>(</span><span class=nx>m</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>	<span class=nx>ut</span><span class=p>,</span> <span class=nx>_</span> <span class=o>:=</span> <span class=nx>t</span><span class=p>.</span><span class=nf>Parse</span><span class=p>(</span><span class=o>*</span><span class=nx>text</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>	<span class=nx>ut</span><span class=p>.</span><span class=nf>Execute</span><span class=p>(</span><span class=nx>os</span><span class=p>.</span><span class=nx>Stdout</span><span class=p>,</span> <span class=kc>nil</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>	<span class=nx>fmt</span><span class=p>.</span><span class=nf>Println</span><span class=p>()</span>
+</span></span><span class=line><span class=cl><span class=p>}</span>
+</span></span></code></pre></td></tr></table></div></div><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span><span class=lnt>12
+</span><span class=lnt>13
+</span><span class=lnt>14
+</span><span class=lnt>15
+</span><span class=lnt>16
+</span><span class=lnt>17
+</span><span class=lnt>18
+</span><span class=lnt>19
+</span><span class=lnt>20
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-go data-lang=go><span class=line><span class=cl><span class=kd>func</span> <span class=nf>main</span><span class=p>()</span> 
+</span></span><span class=line><span class=cl><span class=kd>func</span> <span class=nf>AddFuncsFromPlugin</span><span class=p>(</span><span class=nx>pluginPath</span> <span class=kt>string</span><span class=p>)</span> <span class=kt>error</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=c1>// p will be a *plugin.Plugin
+</span></span></span><span class=line><span class=cl><span class=c1></span>    <span class=nx>p</span><span class=p>,</span> <span class=nx>err</span> <span class=o>:=</span> <span class=nx>plugin</span><span class=p>.</span><span class=nf>Open</span><span class=p>(</span><span class=nx>pluginPath</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=k>if</span> <span class=nx>err</span> <span class=o>!=</span> <span class=kc>nil</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>        <span class=k>return</span> <span class=nx>err</span>
+</span></span><span class=line><span class=cl>    <span class=p>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=c1>// f is a plugin.Symbol - a pointer to a variable or function
+</span></span></span><span class=line><span class=cl><span class=c1></span>    <span class=nx>f</span><span class=p>,</span> <span class=nx>err</span> <span class=o>:=</span> <span class=nx>p</span><span class=p>.</span><span class=nf>Lookup</span><span class=p>(</span><span class=s>&#34;AddFuncs&#34;</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=k>if</span> <span class=nx>err</span> <span class=o>!=</span> <span class=kc>nil</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>        <span class=k>return</span> <span class=nx>err</span>
+</span></span><span class=line><span class=cl>    <span class=p>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=c1>// This will panic if your Symbol does not exactly match the function signature 
+</span></span></span><span class=line><span class=cl><span class=c1></span>    <span class=nx>f</span><span class=p>.(</span><span class=kd>func</span><span class=p>(</span><span class=nx>template</span><span class=p>.</span><span class=nx>FuncMap</span><span class=p>))(</span><span class=nx>t</span><span class=p>.</span><span class=nx>funcs</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>    <span class=k>return</span> <span class=kc>nil</span>
+</span></span><span class=line><span class=cl><span class=p>}</span>
+</span></span></code></pre></td></tr></table></div></div><p>Now we write our plugin. A plugin must always contain exactly one main package. Within the plugin, you can define as many functions and variables as you like.</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt> 1
+</span><span class=lnt> 2
+</span><span class=lnt> 3
+</span><span class=lnt> 4
+</span><span class=lnt> 5
+</span><span class=lnt> 6
+</span><span class=lnt> 7
+</span><span class=lnt> 8
+</span><span class=lnt> 9
+</span><span class=lnt>10
+</span><span class=lnt>11
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-go data-lang=go><span class=line><span class=cl><span class=kn>package</span> <span class=nx>main</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=kn>import</span> <span class=s>&#34;text/template&#34;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=kd>func</span> <span class=nf>rot13</span><span class=p>(</span><span class=nx>s</span> <span class=kt>string</span><span class=p>)</span> <span class=kt>string</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=c1>// perform the rot13
+</span></span></span><span class=line><span class=cl><span class=c1></span><span class=p>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=kd>func</span> <span class=nf>AddFuncs</span><span class=p>(</span><span class=nx>m</span> <span class=nx>template</span><span class=p>.</span><span class=nx>FuncMap</span><span class=p>)</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=nx>m</span><span class=p>[</span><span class=s>&#34;rot13&#34;</span><span class=p>]</span> <span class=p>=</span> <span class=nx>rot13</span>
+</span></span><span class=line><span class=cl><span class=p>}</span>
+</span></span></code></pre></td></tr></table></div></div><p>Now all there is to do is build the plugin, and build/run our application telling it where the built plugin resides. Building a plugin is as simple as passing a flag to the go build command, and it outputs a shared object (.so) for you to use wherever the plugin is needed.</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-sh data-lang=sh><span class=line><span class=cl>go build -buildmode<span class=o>=</span>plugin -o plugin.so plugin/plugin.go
+</span></span></code></pre></td></tr></table></div></div><p>And to see it in action:</p><div class=highlight><div class=chroma><table class=lntable><tr><td class=lntd><pre tabindex=0 class=chroma><code><span class=lnt>1
+</span><span class=lnt>2
+</span></code></pre></td><td class=lntd><pre tabindex=0 class=chroma><code class=language-sh data-lang=sh><span class=line><span class=cl>➜ go run main.go -plugin plugin.so -text <span class=s2>&#34;{{ rot13 \&#34;Hello, World!\&#34; }}&#34;</span>
+</span></span><span class=line><span class=cl>Uryyb, Jbeyq!
+</span></span></code></pre></td></tr></table></div></div><p>This functionality has now been <a href=https://github.com/go-swagger/go-swagger/pull/2745>merged into go-swagger</a> and is available to anyone who needs to use custom template processing with their API generation. There are certainly many more great use cases for plugins in Go and I look forward to seeing if the feature gets any more adoption and what else is done with it in the future!</p></article></main><footer class="mt-8 flex sm:flex-col-reverse justify-between items-center"><p class="mt-0 text-sm">© Kevin Barbour 2022 |
+<a href=https://gohugo.io target=_blank rel="noopener noreferrer">Hugo</a> on
+<a href=https://github.com/mivinci/hugo-theme-minima target=_blank rel="noopener noreferrer">Minima</a></p><p class="flex items-center mt-0"><a class="icon mx-2" href=https://github.com/kevinbarbour title=github><svg fill="#63636f" width="18" role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><title>GitHub</title><path d="M12 .297c-6.63.0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577.0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93.0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176.0.0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22.0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22.0 1.606-.015 2.896-.015 3.286.0.315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg></a><a class="icon mx-2" href=https://www.linkedin.com/in/kevin-barbour/ title=linkedin><svg fill="#0073b1" width="18" role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><title>LinkedIn</title><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853.0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601.0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144.0-2.063-.926-2.063-2.065.0-1.138.92-2.063 2.063-2.063 1.14.0 2.064.925 2.064 2.063.0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225.0H1.771C.792.0.0.774.0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2.0 22.222.0h.003z"/></svg></a><a class="icon mx-2" href=https://twitter.com/kevinbarbourd title=twitter><svg fill="#1da1f2" width="18" role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><title>Twitter</title><path d="M23.954 4.569c-.885.389-1.83.654-2.825.775 1.014-.611 1.794-1.574 2.163-2.723-.951.555-2.005.959-3.127 1.184-.896-.959-2.173-1.559-3.591-1.559-2.717.0-4.92 2.203-4.92 4.917.0.39.045.765.127 1.124C7.691 8.094 4.066 6.13 1.64 3.161c-.427.722-.666 1.561-.666 2.475.0 1.71.87 3.213 2.188 4.096-.807-.026-1.566-.248-2.228-.616v.061c0 2.385 1.693 4.374 3.946 4.827-.413.111-.849.171-1.296.171-.314.0-.615-.03-.916-.086.631 1.953 2.445 3.377 4.604 3.417-1.68 1.319-3.809 2.105-6.102 2.105-.39.0-.779-.023-1.17-.067 2.189 1.394 4.768 2.209 7.557 2.209 9.054.0 13.999-7.496 13.999-13.986.0-.209.0-.42-.015-.63.961-.689 1.8-1.56 2.46-2.548l-.047-.02z"/></svg></a></p></footer></body></html>
